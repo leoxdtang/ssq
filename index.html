@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>双色球策略分析平台</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <div id="app" v-cloak>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">🎱</span>
+        <div>
+          <h1>双色球策略分析平台</h1>
+          <p class="sub">历史数据 · 统计分析 · 策略回测 · 自动更新</p>
+        </div>
+      </div>
+      <div class="status">
+        <span v-if="!loaded" class="badge warn">数据加载中…</span>
+        <span v-else-if="error" class="badge danger">数据加载失败：{{ error }}</span>
+        <span v-else class="badge ok">已加载 {{ records.length }} 期 · 最新 {{ meta.latestIssue }}</span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button :class="{active: activeTab==='overview'}" @click="activeTab='overview'">数据总览</button>
+      <button :class="{active: activeTab==='stats'}" @click="activeTab='stats'">统计分析</button>
+      <button :class="{active: activeTab==='strategy'}" @click="activeTab='strategy'">策略设置</button>
+      <button :class="{active: activeTab==='backtest'}" @click="activeTab='backtest'">回测评估</button>
+      <button :class="{active: activeTab==='compare'}" @click="activeTab='compare'">策略对比</button>
+    </nav>
+
+    <!-- 总览 -->
+    <section v-if="activeTab==='overview'">
+      <div class="cards">
+        <div class="card"><div class="k">最新期号</div><div class="v">{{ latest.issue || '—' }}</div></div>
+        <div class="card"><div class="k">开奖日期</div><div class="v">{{ latest.date || '—' }}</div></div>
+        <div class="card"><div class="k">奖池(元)</div><div class="v">{{ fmt(latest.pool) }}</div></div>
+        <div class="card"><div class="k">数据总期数</div><div class="v">{{ records.length }}</div></div>
+        <div class="card"><div class="k">数据区间</div><div class="v small">{{ meta.latestIssue ? meta.rangeText : '—' }}</div></div>
+      </div>
+
+      <div v-if="realGapCount>0" class="notice">
+        ⚠️ 数据存在缺口（{{ gapText }}）。点击下方“<b>分批次联网更新（补全缺口）</b>”即可在你的浏览器中补全（优先官方接口分批拉取，失败则自动改用开源镜像全量补全）；或在能访问数据源的网络下运行 <code>node scripts/fetch-data.mjs</code> 补全。
+      </div>
+      <div v-if="historicalGapText" class="hint info">
+        ℹ️ 以下为<b>历史真实停摆</b>（春节休市 / 2020 疫情），非数据缺失，无需补全：{{ historicalGapText }}
+      </div>
+
+      <div class="panel">
+        <h3>最新一期 · 各奖项金额</h3>
+        <table class="tbl" v-if="latest.issue">
+          <thead><tr><th>奖级</th><th>中奖条件</th><th>单注奖金(元)</th><th>注数</th></tr></thead>
+          <tbody>
+            <tr><td>一等奖</td><td>6红+1蓝</td><td>{{ fmt(latest.prize1 && latest.prize1.amount) }}</td><td>{{ fmt(latest.prize1 && latest.prize1.count) }}</td></tr>
+            <tr><td>二等奖</td><td>6红</td><td>{{ fmt(latest.prize2 && latest.prize2.amount) }}</td><td>{{ fmt(latest.prize2 && latest.prize2.count) }}</td></tr>
+            <tr><td>三等奖</td><td>5红+1蓝</td><td>3,000（固定）</td><td>{{ fmt(latest.prize3 && latest.prize3.count) }}</td></tr>
+            <tr><td>四等奖</td><td>5红 / 4红+1蓝</td><td>200（固定）</td><td>—</td></tr>
+            <tr><td>五等奖</td><td>4红 / 3红+1蓝</td><td>10（固定）</td><td>—</td></tr>
+            <tr><td>六等奖</td><td>2红+1蓝 / 1红+1蓝 / 仅1蓝</td><td>5（固定）</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h3>最近 12 期开奖</h3>
+        <table class="tbl">
+          <thead><tr><th>期号</th><th>日期</th><th>红球</th><th>蓝球</th></tr></thead>
+          <tbody>
+            <tr v-for="r in recentRows" :key="r.issue">
+              <td>{{ r.issue }}</td><td>{{ r.date }}</td>
+              <td><span class="ball red" v-for="n in r.red" :key="n">{{ pad(n) }}</span></td>
+              <td><span class="ball blue">{{ pad(r.blue) }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h3>数据更新（本地联网，无需 GitHub Pages）</h3>
+        <p class="hint">点击下方按钮可直接在你的浏览器中联网补全/更新数据；更新后请下载数据文件覆盖本地，下次双击打开即为最新。此功能不依赖任何账号或在线服务。</p>
+        <div class="row">
+          <button class="btn primary" :disabled="updating" @click="updateBatchedData">{{ updating ? '更新中…' : '分批次联网更新（补全缺口）' }}</button>
+          <button class="btn" :disabled="updating" @click="updateData">全量重新拉取（镜像）</button>
+          <button class="btn" :disabled="!loaded" @click="downloadData('js')">下载 ssq.js（离线版）</button>
+          <button class="btn" :disabled="!loaded" @click="downloadData('json')">下载 ssq.json（在线版/备份）</button>
+        </div>
+        <p class="hint" v-if="updateMsg" :class="{ danger: updateMsg.startsWith('❌') }">{{ updateMsg }}</p>
+        <ul class="log" v-if="updateLog.length">
+          <li v-for="(l, i) in updateLog" :key="i">{{ l }}</li>
+        </ul>
+        <details class="help">
+          <summary>这两个“下载”分别是什么意思？我该怎么做？（点击展开）</summary>
+          <div class="help-body">
+            <p><b>① 下载 ssq.js（离线版）</b><br/>
+            <u>是什么</u>：把当前页面里（可能已联网更新过的）最新数据，导出成一个 <code>ssq.js</code> 文件——它就是把数据写进网页的“离线数据包”。<br/>
+            <u>有什么用</u>：本平台默认<strong>双击 index.html 离线打开</strong>，而浏览器不允许离线页面自己读取本地文件，所以数据必须“内嵌”在这个 ssq.js 里。你每次联网更新后，必须下载它并替换掉项目里原来的 <code>data/ssq.js</code>，下次双击打开才是新数据。<br/>
+            <u>你需要做</u>：点“下载 ssq.js”→ 浏览器把文件存到“下载”文件夹 → 把它<strong>移动到项目目录的 data/ 文件夹、覆盖同名旧文件</strong>。完成。</p>
+
+            <p><b>② 下载 ssq.json（在线版/备份）</b><br/>
+            <u>是什么</u>：同样的最新数据，但导出为标准的 <code>ssq.json</code> 格式（数据本身是 JSON）。<br/>
+            <u>有什么用</u>：它是“在线版/备份”文件——将来若把平台发布到 GitHub Pages（需要联网访问），页面会去读取这个 <code>data/ssq.json</code>。同时它也是一份<strong>纯数据备份</strong>，可单独保存或分享。<br/>
+            <u>你需要做</u>：点“下载 ssq.json”→ 存到“下载”文件夹 → 若用于发布，把它<strong>上传/覆盖到仓库的 data/ 文件夹</strong>并推送；若仅备份，妥善保存即可。</p>
+
+            <p class="muted">小结：想在本机双击用 → 用 <b>ssq.js（离线版）</b>；想发布到网上或留一份标准备份 → 用 <b>ssq.json（在线版/备份）</b>。两者内容相同，只是用途与存放位置不同。</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- 统计分析 -->
+    <section v-else-if="activeTab==='stats'">
+      <div class="panel">
+        <h3>分析参数</h3>
+        <div class="row">
+          <label>分析时间段(起)</label><input type="number" v-model.number="statsStart" :min="minIssue" :max="maxIssue" />
+          <label>止</label><input type="number" v-model.number="statsEnd" :min="minIssue" :max="maxIssue" />
+          <label>分析窗口 W</label><input type="number" v-model.number="statsW" min="10" />
+          <button class="btn" @click="useLargestSeg">用最大连续段</button>
+          <button class="btn primary" @click="runStats">计算统计</button>
+        </div>
+        <p class="hint" v-if="statsInfo">{{ statsInfo }}</p>
+      </div>
+
+      <div v-if="statsResult" class="charts-grid">
+        <div class="chart-box"><div id="chartRedFreq" class="chart"></div></div>
+        <div class="chart-box"><div id="chartBlueFreq" class="chart"></div></div>
+        <div class="chart-box"><div id="chartRedOmit" class="chart"></div></div>
+        <div class="chart-box"><div id="chartZone" class="chart"></div></div>
+        <div class="chart-box"><div id="chartParity" class="chart"></div></div>
+        <div class="chart-box"><div id="chartSum" class="chart"></div></div>
+      </div>
+
+      <div class="panel" v-if="statsResult">
+        <h3>窗口汇总（共 {{ statsResult.N }} 期）</h3>
+        <div class="cards">
+          <div class="card"><div class="k">平均和值</div><div class="v">{{ statsResult.sum.mean.toFixed(1) }}</div></div>
+          <div class="card"><div class="k">平均 AC 值</div><div class="v">{{ statsResult.ac.mean.toFixed(2) }}</div></div>
+          <div class="card"><div class="k">平均连号组数</div><div class="v">{{ statsResult.consec.mean.toFixed(2) }}</div></div>
+        </div>
+        <table class="tbl" v-if="statsResult.prizeAvg.prize1.valid">
+          <thead><tr><th>奖级</th><th>平均注数</th><th>平均单注奖金(元)</th></tr></thead>
+          <tbody>
+            <tr><td>一等奖</td><td>{{ statsResult.prizeAvg.prize1.avgCount?.toFixed(1) }}</td><td>{{ fmt(statsResult.prizeAvg.prize1.avgAmount) }}</td></tr>
+            <tr><td>二等奖</td><td>{{ statsResult.prizeAvg.prize2.avgCount?.toFixed(1) }}</td><td>{{ fmt(statsResult.prizeAvg.prize2.avgAmount) }}</td></tr>
+            <tr><td>三等奖</td><td>{{ statsResult.prizeAvg.prize3.avgCount?.toFixed(1) }}</td><td>3,000（固定）</td></tr>
+          </tbody>
+        </table>
+        <p class="hint" v-else>该窗口缺少浮动奖金额数据（待自动更新补全后可统计）。</p>
+      </div>
+    </section>
+
+    <!-- 策略设置 -->
+    <section v-else-if="activeTab==='strategy'">
+      <div class="panel">
+        <h3>内置策略</h3>
+        <div class="strategy-list">
+          <label class="strat" v-for="(s, i) in builtins" :key="s.type">
+            <input type="radio" :value="i" v-model.number="builtinIdx" />
+            <div><b>{{ s.name }}</b><span class="desc">{{ s.desc }}</span></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>自定义策略（可视化规则）</h3>
+        <div class="row">
+          <label>使用自定义</label><input type="checkbox" v-model="useCustom" />
+        </div>
+        <div v-if="useCustom" class="custom-grid">
+          <label>红球选号依据<select v-model="custom.redMethod"><option value="frequency">频率(热号)</option><option value="omission">遗漏(冷号)</option><option value="composite">综合评分</option></select></label>
+          <label>蓝球选号依据<select v-model="custom.blueMethod"><option value="frequency">频率</option><option value="omission">遗漏</option><option value="composite">综合</option></select></label>
+          <label>候选数 K<input type="number" v-model.number="custom.k" min="6" max="13" /></label>
+          <label>最大投注注数<input type="number" v-model.number="custom.maxCombos" min="1" max="5000" /></label>
+          <label>排除号码<input type="text" v-model="custom.excludeText" placeholder="如 1,2,33" /></label>
+          <label>奇偶偏好<select v-model="custom.parityPref"><option value="any">不限</option><option value="balance">均衡</option><option value="moreOdd">偏奇数</option><option value="moreEven">偏偶数</option></select></label>
+          <label><input type="checkbox" v-model="custom.zoneBalance" /> 区间均衡(每区2红)</label>
+          <label><input type="checkbox" v-model="custom.allowConsecutive" /> 允许连号</label>
+        </div>
+        <p class="hint" v-if="useCustom">K&le;6 为单式（1 注）；K&gt;6 为复式（C(K,6) 注）。当复式注数超过“最大投注注数”时，将自动减少红球候选数，避免单期成本失控。</p>
+      </div>
+
+      <div class="panel">
+        <h3>选号预览</h3>
+        <div class="row">
+          <label>预览窗口 W</label><input type="number" v-model.number="previewW" min="10" />
+          <button class="btn primary" @click="runPreview">生成预览</button>
+        </div>
+        <div v-if="previewPick" class="preview">
+          <div>红球：<span class="ball red" v-for="n in previewPick.red" :key="n">{{ pad(n) }}</span></div>
+          <div>蓝球：<span class="ball blue" v-for="n in previewPick.blue" :key="n">{{ pad(n) }}</span></div>
+          <div class="hint">投注模式：{{ previewPick.mode === 'single' ? '单式(' + previewPick.combos + '注)' : '复式(' + previewPick.combos + '注, ¥' + previewPick.cost + ')' }}</div>
+          <div class="hint danger" v-if="previewPick.capped">⚠️ 注数超过上限 {{ previewPick.maxCombos }}，已自动裁剪为 {{ previewPick.requestedK }}→{{ previewPick.red.length }} 个红球（{{ previewPick.combos }} 注）。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 回测评估 -->
+    <section v-else-if="activeTab==='backtest'">
+      <div class="panel">
+        <h3>回测参数</h3>
+        <div class="row wrap">
+          <label>策略</label>
+          <select v-model="useCustomBt">
+            <option :value="false">内置：{{ builtins[builtinIdx].name }}</option>
+            <option :value="true">自定义策略</option>
+          </select>
+          <label>时间段(起)</label><input type="number" v-model.number="btStart" :min="minIssue" :max="maxIssue" />
+          <label>止</label><input type="number" v-model.number="btEnd" :min="minIssue" :max="maxIssue" />
+          <label>分析窗口 W</label><input type="number" v-model.number="btW" min="5" />
+          <label>策略应用窗口 A</label><input type="number" v-model.number="btA" min="1" />
+          <label>随机种子</label><input type="number" v-model.number="btSeed" />
+          <button class="btn" @click="useLargestSegBt">用最大连续段</button>
+          <button class="btn primary" @click="runBacktest">运行回测</button>
+        </div>
+        <p class="hint" v-if="btInfo">{{ btInfo }}</p>
+      </div>
+
+      <div v-if="btResult" class="cards">
+        <div class="card"><div class="k">评估期数</div><div class="v">{{ btResult.evaluated }}</div></div>
+        <div class="card"><div class="k">总投入(元)</div><div class="v">{{ fmt(btResult.totalCost) }}</div></div>
+        <div class="card"><div class="k">总中奖(元)</div><div class="v">{{ fmt(btResult.totalWin) }}</div></div>
+        <div class="card" :class="btResult.net>=0?'good':'bad'"><div class="k">净收益(元)</div><div class="v">{{ fmt(btResult.net) }}</div></div>
+        <div class="card" :class="btResult.roi>=0?'good':'bad'"><div class="k">ROI</div><div class="v">{{ btResult.roi.toFixed(1) }}%</div></div>
+        <div class="card"><div class="k">命中率</div><div class="v">{{ btResult.hitRate.toFixed(1) }}%</div></div>
+        <div class="card"><div class="k">最大回撤(元)</div><div class="v">{{ fmt(btResult.maxDrawdown) }}</div></div>
+        <div class="card"><div class="k">最长连亏(期)</div><div class="v">{{ btResult.maxLossStreak }}</div></div>
+      </div>
+
+      <div v-if="btResult && btResult.missingPrizePeriods.length" class="notice">
+        ⚠️ 回测中有 {{ btResult.missingPrizePeriods.length }} 期为一/二等奖浮动金额缺失，相关一等奖/二等奖奖金按 0 计，已低估收益；自动更新补全数据后更精确。
+      </div>
+
+      <div v-if="btResult" class="charts-grid">
+        <div class="chart-box wide"><div id="chartEquity" class="chart"></div></div>
+        <div class="chart-box"><div id="chartTier" class="chart"></div></div>
+      </div>
+
+      <div class="panel" v-if="btResult">
+        <div class="row between">
+          <h3>逐期明细</h3>
+          <button class="btn" @click="exportCsv">导出 CSV</button>
+        </div>
+        <div class="tbl-scroll">
+          <table class="tbl">
+            <thead><tr><th>期号</th><th>日期</th><th>投入</th><th>中奖</th><th>净</th><th>奖级</th></tr></thead>
+            <tbody>
+              <tr v-for="d in btResult.details.slice(0,300)" :key="d.issue">
+                <td>{{ d.issue }}</td><td>{{ d.date }}</td><td>{{ d.cost }}</td>
+                <td>{{ d.win }}</td><td :class="d.net>=0?'good':'bad'">{{ d.net }}</td><td>{{ d.tierName }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="hint">仅显示前 300 行，导出 CSV 含全部 {{ btResult.details.length }} 行。</p>
+      </div>
+    </section>
+
+    <!-- 策略对比 -->
+    <section v-else-if="activeTab==='compare'">
+      <div class="panel">
+        <h3>选择对比策略</h3>
+        <div class="strategy-list">
+          <label class="strat" v-for="(s, i) in builtins" :key="'c'+s.type">
+            <input type="checkbox" :value="i" v-model="compareIdx" />
+            <div><b>{{ s.name }}</b></div>
+          </label>
+          <label class="strat">
+            <input type="checkbox" value="custom" v-model="compareIdx" />
+            <div><b>自定义策略</b></div>
+          </label>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>对比参数</h3>
+        <div class="row wrap">
+          <label>时间段(起)</label><input type="number" v-model.number="cStart" :min="minIssue" :max="maxIssue" />
+          <label>止</label><input type="number" v-model.number="cEnd" :min="minIssue" :max="maxIssue" />
+          <label>W</label><input type="number" v-model.number="cW" min="5" />
+          <label>A</label><input type="number" v-model.number="cA" min="1" />
+          <label>种子</label><input type="number" v-model.number="cSeed" />
+          <button class="btn primary" @click="runCompare">运行对比</button>
+        </div>
+      </div>
+
+      <div v-if="compareResult" class="panel">
+        <h3>对比结果</h3>
+        <table class="tbl">
+          <thead><tr><th>策略</th><th>评估期数</th><th>净收益</th><th>ROI</th><th>命中率</th><th>总投入</th><th>总中奖</th></tr></thead>
+          <tbody>
+            <tr v-for="r in compareResult" :key="r.name">
+              <td>{{ r.name }}</td><td>{{ r.evaluated }}</td>
+              <td :class="r.net>=0?'good':'bad'">{{ fmt(r.net) }}</td>
+              <td :class="r.roi>=0?'good':'bad'">{{ r.roi.toFixed(1) }}%</td>
+              <td>{{ r.hitRate.toFixed(1) }}%</td>
+              <td>{{ fmt(r.totalCost) }}</td><td>{{ fmt(r.totalWin) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="chart-box wide"><div id="chartCompare" class="chart"></div></div>
+      </div>
+    </section>
+
+    <footer class="foot">
+      本平台仅用于双色球历史数据分析与策略回测。彩票开奖完全随机，任何策略均无法预测中奖，所有 ROI 均为历史模拟，不代表未来收益，不构成任何投注建议。
+    </footer>
+  </div>
+
+  <script src="assets/vendor/vue.global.prod.js"></script>
+  <script src="assets/vendor/echarts.min.js"></script>
+  <!-- 内嵌数据（支持 file:// 双击直接打开；同时保留 data/ssq.json 供在线版 fetch） -->
+  <script src="data/ssq.js"></script>
+  <script src="assets/store.js"></script>
+  <script src="assets/stats.js"></script>
+  <script src="assets/strategies.js"></script>
+  <script src="assets/backtest.js"></script>
+  <script src="assets/charts.js"></script>
+  <script src="assets/dataupdate.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>
